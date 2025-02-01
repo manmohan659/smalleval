@@ -1,3 +1,4 @@
+//my current file
 import { BrowserAI } from "@browserai/browserai";
 import { Model, ModelInfo, GenerationOptions, EvaluationMetrics, EvaluationLog } from "./types";
 
@@ -33,7 +34,6 @@ export class BrowserAIModel implements Model {
             await this.browserAI.loadModel(this.modelConfig.model);
             this.modelLoaded = true;
         }
-
         return await this.browserAI.generateText(context, {
             stopSequence: options?.stopSequence,
             generationSize: options?.generationSize,
@@ -57,13 +57,11 @@ export class BrowserAIModel implements Model {
             let totalTokens = 0;
             const evaluationLogs: EvaluationLog[] = [];
             
-            const baseURL = import.meta.env.VITE_DATASET_BASE_URL; 
-            const [repo_name, file_name] = dataset.split(':');
-            const url = `${baseURL}/${file_name}`;
-            const response = await fetch(url);
+            // Read from local datasets folder
+            const response = await fetch(`/datasets/${dataset.split(':')[1]}`);
             
             if (!response.ok) {
-                throw new Error(`Failed to fetch dataset: ${response.statusText}`);
+                throw new Error(`Failed to load dataset: ${response.statusText}`);
             }
     
             const text = await response.text();
@@ -71,63 +69,120 @@ export class BrowserAIModel implements Model {
                 .trim()
                 .split('\n')
                 .map(line => JSON.parse(line));
-            
+    
+            // --- Helper functions for parsing ---
+            const parseMultipleChoiceResponse = (raw: string, numChoices: number): string | null => {
+                const allowedLetters = Array.from({ length: numChoices }, (_, i) => String.fromCharCode(65 + i));
+                
+                // 1. First try to find a standalone letter
+                const standaloneMatch = raw.match(new RegExp(`\\b([${allowedLetters.join('')}])\\b`, 'i'));
+                if (standaloneMatch) return standaloneMatch[1].toUpperCase();
+                
+                // 2. Look for letter with parentheses or period
+                const withPuncMatch = raw.match(new RegExp(`[\\(\\[]?([${allowedLetters.join('')}])[\\)\\]\\.]`, 'i'));
+                if (withPuncMatch) return withPuncMatch[1].toUpperCase();
+                
+                // 3. Look for "Answer: X" or "Choice: X" pattern
+                const answerMatch = raw.match(new RegExp(`(?:answer|choice)\\s*(?:is)?\\s*:?\\s*([${allowedLetters.join('')}])`, 'i'));
+                if (answerMatch) return answerMatch[1].toUpperCase();
+                
+                // 4. If nothing else works, just take the first valid letter that appears
+                const firstLetterMatch = raw.match(new RegExp(`([${allowedLetters.join('')}])`, 'i'));
+                if (firstLetterMatch) return firstLetterMatch[1].toUpperCase();
+                
+                return null;
+            };
+    
+            const parseMathResponse = (raw: string): string | null => {
+                const match = raw.match(/[-+]?(\d*\.\d+|\d+)/);
+                return match ? match[0] : null;
+            };
+            // --- End helper functions ---
+    
             for (let i = 0; i < examples.length; i++) {
                 const example = examples[i];
                 let prompt = '';
                 let choices: string[] = [];
                 let expectedAnswer = '';
                 let type: 'math' | 'multiple-choice' = 'multiple-choice';
-
+    
                 if (example.gold_index !== undefined && Array.isArray(example.choices)) {
                     // TruthfulQA format
                     choices = example.choices;
-                    prompt = `Question: ${example.question}\nChoices:\nA) ${choices[0]}\nB) ${choices[1]}\nAnswer:`;
+                    const allowed = Array.from({ length: choices.length }, (_, idx) => String.fromCharCode(65 + idx)).join(', ');
+                    prompt = `Question: ${example.question}\nChoices:\n` + 
+                        choices.map((choice, idx) => `${String.fromCharCode(65 + idx)}) ${choice}`).join('\n') + 
+                        `\nAnswer: Please respond with only one of the following letters: ${allowed}.DO NOT provide explanations or additional text.\nAnswer: `;
                     expectedAnswer = String.fromCharCode(65 + example.gold_index);
                 } else if (example.choices && example.choices.text) {
                     // ARC format
                     choices = example.choices.text;
-                    prompt = `Question: ${example.question}\nChoices:\nA) ${choices[0]}\nB) ${choices[1]}\nC) ${choices[2]}\nD) ${choices[3]}\nAnswer:`;
+                    const allowed = Array.from({ length: choices.length }, (_, idx) => String.fromCharCode(65 + idx)).join(', ');
+                    prompt = `Question: ${example.question}\nChoices:\n` + 
+                        choices.map((choice, idx) => `${String.fromCharCode(65 + idx)}) ${choice}`).join('\n') + 
+                        `\nAnswer: Please respond with only one of the following letters: ${allowed}. DO NOT provide explanations or additional text.\nAnswer: `;
                     expectedAnswer = example.answerKey;
-                } else if (example.answer && example.equation) {
+                }  else if (example.answer && example.equation) {
                     // MathQA format
                     type = 'math';
-                    prompt = `Question: ${example.question}\nProvide only the numeric answer, no explanation:`;
+                    const isTurkishMath = dataset.includes('MathQA-TR') || /[çğıöşü]/.test(example.question);
+                    
+                    if (isTurkishMath) {
+                        prompt = `Question: ${example.question}\nProvide ONLY a single number as answer. For example: If asked '2+2=?', just write '4'.\nAnswer: `;
+                    } else {
+                        prompt = `Question: ${example.question}\nProvide only the numeric answer, no explanation:`;
+                    }
                     expectedAnswer = example.answer;
                 } else if (Array.isArray(example.choices) && typeof example.answer === 'number') {
                     // Standard multiple choice format
                     choices = example.choices;
+                    const allowed = Array.from({ length: choices.length }, (_, idx) => String.fromCharCode(65 + idx)).join(', ');
                     prompt = `Question: ${example.question}\nChoices:\n` + 
                         choices.map((choice, idx) => `${String.fromCharCode(65 + idx)}) ${choice}`).join('\n') + 
-                        '\nAnswer:';
+                        `\nAnswer: Please respond with only one of the following letters: ${allowed}. DO NOT provide explanations or additional text.\nAnswer: `;
                     expectedAnswer = String.fromCharCode(65 + example.answer);
                 }
+                else if (example.activity_label) {  // This is specific to hellaswag Thai dataset
+                    // Thai Hellaswag format
+                    type = 'multiple-choice';
+                    choices = example.endings;
+                    const allowed = Array.from({ length: choices.length }, (_, idx) => String.fromCharCode(65 + idx)).join(', ');
+                    prompt = `Question: Select the most appropriate ending for this context.\nContext: ${example.ctx}\nChoices:\n` + 
+                        choices.map((choice, idx) => `${String.fromCharCode(65 + idx)}) ${choice}`).join('\n') + 
+                        `\nIMPORTANT: You must respond with only a single letter (${allowed}). DO NOT write any explanation or additional text.\nAnswer: `;
+                    expectedAnswer = String.fromCharCode(65 + example.label);
+                }
     
-                const response = await this.generate(prompt);
+                const rawResponse = await this.generate(prompt);
                 let predictedAnswer = '';
                 let isCorrect = false;
     
                 if (type === 'math') {
-                    const numberMatch = response.match(/[-+]?(\d*\.\d+|\d+)/);
-                    if (numberMatch) {
-                        const numericResponse = parseFloat(numberMatch[0]);
+                    const parsedNumber = parseMathResponse(rawResponse);
+                    if (parsedNumber) {
+                        predictedAnswer = parsedNumber;
+                        const numericResponse = parseFloat(parsedNumber);
                         const expectedNumeric = parseFloat(expectedAnswer);
                         isCorrect = Math.abs(numericResponse - expectedNumeric) < 0.01;
-                        predictedAnswer = numericResponse.toString();
                     } else {
                         predictedAnswer = "No numeric answer found";
                         isCorrect = false;
                     }
                 } else {
-                    const cleanResponse = response.trim().toUpperCase();
-                    if (/[ABCD]/.test(cleanResponse)) {
-                        predictedAnswer = cleanResponse[0];
-                        isCorrect = predictedAnswer === expectedAnswer;
+                    // Use improved multiple choice parsing
+                    const parsedLetter = parseMultipleChoiceResponse(rawResponse, choices.length);
+                    if (parsedLetter) {
+                        predictedAnswer = parsedLetter;
+                        isCorrect = (predictedAnswer === expectedAnswer.toUpperCase());
+                    } else {
+                        // Fallback: try using the raw response if nothing valid is found
+                        predictedAnswer = rawResponse.trim().toUpperCase();
+                        isCorrect = (predictedAnswer === expectedAnswer.toUpperCase());
                     }
                 }
     
                 if (isCorrect) correctAnswers++;
-                totalTokens += prompt.length + response.length;
+                totalTokens += prompt.length + rawResponse.length;
                 
                 evaluationLogs.push({
                     prompt,
@@ -139,7 +194,7 @@ export class BrowserAIModel implements Model {
                     type,
                     subject: example.subject,
                     latency: totalTokens * 1000 / (Date.now() - startTime),
-                    tokenCount: prompt.length + response.length
+                    tokenCount: prompt.length + rawResponse.length
                 });
     
                 const progress = ((i + 1) / examples.length) * 100;
