@@ -183,6 +183,9 @@ export class BrowserAIModel implements Model {
     
                 if (isCorrect) correctAnswers++;
                 totalTokens += prompt.length + rawResponse.length;
+                if (evaluationLogs.length >= 10) {
+                    evaluationLogs.shift(); 
+                  }
                 
                 evaluationLogs.push({
                     prompt,

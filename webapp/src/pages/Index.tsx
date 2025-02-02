@@ -224,10 +224,9 @@ const Index = () => {
       for (const ds of datasets) {
         addLog(`Evaluating dataset: ${ds.name}`, "info");
         const startTime = performance.now();
-        const outcome: EvaluationMetrics = await model.evaluate(ds.id); // Explicitly type outcome
-
+        const outcome: EvaluationMetrics = await model.evaluate(ds.id);
         const endTime = performance.now();
-
+      
         resultsArr.push({
           datasetId: ds.id,
           datasetName: ds.name,
@@ -240,7 +239,11 @@ const Index = () => {
           },
           evalTime: (endTime - startTime) / 1000,
         });
-
+      
+        addLog(`Dataset ${ds.name} evaluation complete.`, "success");
+      
+        // Flush logs to prevent memory overload
+        setLogs([]);
       }
 
       setAllEvalsResults(resultsArr);
